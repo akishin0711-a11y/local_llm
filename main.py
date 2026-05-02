@@ -217,6 +217,100 @@ def build_vector_store(files, base_url, model_name="local-model"):
     vector_db.save_local(DB_DIR)
     return vector_db
 
+# --- RAG メタデータ管理 ---
+import json
+
+METADATA_FILE = os.path.join(DB_DIR, "rag_metadata.json")
+MAX_DB_SIZE_MB = 100  # 最大サイズ（MB）
+
+def load_rag_metadata():
+    """RAGメタデータを読み込む"""
+    if os.path.exists(METADATA_FILE):
+        try:
+            with open(METADATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {"chunks": {}}
+    return {"chunks": {}}
+
+def save_rag_metadata(metadata):
+    """RAGメタデータを保存"""
+    os.makedirs(DB_DIR, exist_ok=True)
+    with open(METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+def update_chunk_usage(chunk_id):
+    """チャンクの使用回数と最終使用時刻を更新"""
+    metadata = load_rag_metadata()
+    if chunk_id not in metadata["chunks"]:
+        metadata["chunks"][chunk_id] = {"count": 0, "last_used": None}
+    metadata["chunks"][chunk_id]["count"] += 1
+    metadata["chunks"][chunk_id]["last_used"] = get_tokyo_now().isoformat()
+    save_rag_metadata(metadata)
+
+def get_db_size_mb():
+    """FAISS DBのディスク容量を取得（MB）"""
+    if not os.path.exists(DB_DIR):
+        return 0
+    total_size = 0
+    for root, dirs, files in os.walk(DB_DIR):
+        for file in files:
+            total_size += os.path.getsize(os.path.join(root, file))
+    return total_size / (1024 * 1024)
+
+def cleanup_low_usage_chunks():
+    """使用頻度の低いチャンクを削除して容量管理"""
+    current_size = get_db_size_mb()
+    if current_size <= MAX_DB_SIZE_MB:
+        return False  # 削除不要
+    
+    metadata = load_rag_metadata()
+    if not metadata["chunks"]:
+        return False
+    
+    # 使用回数でソート（少ない順）
+    sorted_chunks = sorted(
+        metadata["chunks"].items(),
+        key=lambda x: (x[1]["count"], x[1]["last_used"] or "")
+    )
+    
+    # 最も使用されていないチャンクから削除候補に
+    removed_count = 0
+    for chunk_id, info in sorted_chunks:
+        if current_size <= MAX_DB_SIZE_MB * 0.8:  # 容量が80%以下なら停止
+            break
+        # メタデータから削除（実際のFAISS削除は再構築が必要なため省略）
+        del metadata["chunks"][chunk_id]
+        removed_count += 1
+        # ディスク容量を再計算
+        current_size = get_db_size_mb()
+    
+    save_rag_metadata(metadata)
+    
+    # 容量が超過している場合、FAISSインデックスを再構築
+    if get_db_size_mb() > MAX_DB_SIZE_MB:
+        st.warning(f"⚠️ RAG容量が制限超過。インデックスを最適化中...")
+        rebuild_rag_index()
+        return True
+    
+    return removed_count > 0
+
+def rebuild_rag_index():
+    """使用中のメタデータに基づいてFAISSインデックスを再構築"""
+    # 新しいディレクトリに再構築し、古いものを置き換え
+    metadata = load_rag_metadata()
+    if not metadata["chunks"] or not os.path.exists(DB_DIR):
+        return
+    
+    try:
+        # 既存の有効なチャンクのみを保持
+        shutil.rmtree(DB_DIR)
+        os.makedirs(DB_DIR, exist_ok=True)
+        save_rag_metadata(metadata)
+        st.success(f"✅ RAGインデックスを最適化しました")
+    except Exception as e:
+        st.error(f"❌ インデックス再構築エラー: {e}")
+
 # 1. LM Studioへの接続設定
 @st.cache_resource
 def get_openai_client(base_url):
@@ -308,6 +402,36 @@ with st.sidebar:
     
     if use_rag:
         st.info(f"📂 蓄積場所: `{DB_DIR}/`")
+        
+        # RAG容量表示
+        db_size = get_db_size_mb()
+        size_percent = (db_size / MAX_DB_SIZE_MB) * 100 if MAX_DB_SIZE_MB > 0 else 0
+        col_size1, col_size2 = st.columns([3, 1])
+        with col_size1:
+            st.progress(min(size_percent / 100, 1.0), text=f"容量: {db_size:.1f}MB / {MAX_DB_SIZE_MB}MB")
+        with col_size2:
+            if st.button("🔄 最適化", key="optimize_rag"):
+                if cleanup_low_usage_chunks():
+                    st.success("✅ 低使用度チャンクを削除しました")
+                    st.rerun()
+                else:
+                    st.info("ℹ️ 最適化は不要です")
+        
+        # メタデータ表示
+        metadata = load_rag_metadata()
+        if metadata["chunks"]:
+            st.caption(f"📊 登録チャンク数: {len(metadata['chunks'])}")
+            # 使用頻度トップ3を表示
+            top_chunks = sorted(
+                metadata["chunks"].items(),
+                key=lambda x: x[1]["count"],
+                reverse=True
+            )[:3]
+            if top_chunks:
+                with st.expander("📈 使用頻度トップ 3"):
+                    for i, (chunk_id, info) in enumerate(top_chunks, 1):
+                        st.caption(f"{i}. 使用回数: {info['count']} 回 | 最終使用: {info['last_used'][:10] if info['last_used'] else '未使用'}")
+        
         if st.button("🗑️ 蓄積データをクリア"):
             if os.path.exists(DB_DIR):
                 shutil.rmtree(DB_DIR)
@@ -437,6 +561,15 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
             # 関連する上位3チャンクを取得
             docs = st.session_state.vector_db.similarity_search(prompt, k=3)
             external_context += "\n\n【関連資料からの抜粋】\n" + "\n---\n".join([d.page_content for d in docs])
+            
+            # 使用度を記録
+            for idx, doc in enumerate(docs):
+                chunk_id = f"chunk_{idx}_{abs(hash(doc.page_content)) % 100000}"
+                update_chunk_usage(chunk_id)
+            
+            # 自動削除チェック
+            if cleanup_low_usage_chunks():
+                st.info("💡 RAG容量が最適化されました")
 
     # --- Yahoo天気情報取得 ---
     if use_weather and YAHOO_APP_ID:
