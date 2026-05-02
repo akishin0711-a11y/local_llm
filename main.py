@@ -21,7 +21,7 @@ try:
 except Exception:
     YAHOO_APP_ID = "dmVyPTIwMjUwNyZpZD1wZVJpUEo4OFV4Jmhhc2g9TXpJeU5EVTNaVEV4WkRZelltTXdZUQ"
 
-DB_DIR = "faiss_index"
+DB_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "faiss_index"))
 
 # --- 外部API・ユーティリティ関数の定義（呼び出しより前に配置） ---
 
@@ -174,12 +174,23 @@ def fetch_weekly_forecast(coordinates):
     return ""
 
 # RAGエンジン: 文書をベクトル化
+def register_new_chunks(chunks):
+    metadata = load_rag_metadata()
+    for chunk in chunks:
+        chunk_id = f"chunk_{abs(hash(chunk)) % 1000000}"
+        if chunk_id not in metadata["chunks"]:
+            metadata["chunks"][chunk_id] = {"count": 0, "last_used": None}
+    save_rag_metadata(metadata)
+
+
 def build_vector_store(files, base_url, model_name="local-model"):
     all_text = ""
+    os.makedirs(DB_DIR, exist_ok=True)
     for f in files:
         if f.type == "application/pdf":
             reader = PdfReader(f)
-            all_text += f"\n[File: {f.name}]\n" + "\n".join([p.extract_text() for p in reader.pages])
+            page_texts = [p.extract_text() or "" for p in reader.pages]
+            all_text += f"\n[File: {f.name}]\n" + "\n".join(page_texts)
         elif f.type == "text/plain":
             all_text += f"\n[File: {f.name}]\n" + f.read().decode("utf-8")
         elif f.type == "text/calendar" or f.name.endswith(".ics"):
@@ -201,21 +212,26 @@ def build_vector_store(files, base_url, model_name="local-model"):
                 st.error(f"カレンダーの解析に失敗しました ({f.name}): {e}")
         f.seek(0)
     
-    if not all_text.strip(): return None
+    if not all_text.strip():
+        return None
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_text(all_text)
     
     embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
     
-    if os.path.exists(DB_DIR):
-        vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-        vector_db.add_texts(chunks)
-    else:
-        vector_db = FAISS.from_texts(chunks, embeddings)
-    
-    vector_db.save_local(DB_DIR)
-    return vector_db
+    try:
+        if os.path.exists(DB_DIR):
+            vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+            vector_db.add_texts(chunks)
+        else:
+            vector_db = FAISS.from_texts(chunks, embeddings)
+        vector_db.save_local(DB_DIR)
+        register_new_chunks(chunks)
+        return vector_db
+    except Exception as e:
+        st.error(f"RAGインデックスの保存に失敗しました: {e}")
+        return None
 
 # --- RAG メタデータ管理 ---
 import json
