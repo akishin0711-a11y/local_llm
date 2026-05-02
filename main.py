@@ -7,10 +7,7 @@ import time
 import base64
 from PyPDF2 import PdfReader
 from datetime import datetime
-try:
-    from icalendar import Calendar
-except ImportError:
-    Calendar = None
+from icalendar import Calendar
 import urllib.parse
 from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -259,6 +256,10 @@ with st.sidebar:
     st.subheader("🤖 Model Selection")
     embedding_model = "local-model" # デフォルト値
     if lm_url:
+        # ngrok を使用している場合、/v1 忘れを警告する
+        if "ngrok-free" in lm_url and not lm_url.endswith("/v1"):
+            st.warning("⚠️ ngrok URL の末尾に '/v1' を追加してください。")
+
         try:
             models = client.models.list()
             model_list = [m.id for m in models.data] if models.data else []
