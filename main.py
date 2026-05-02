@@ -221,7 +221,7 @@ def build_vector_store(files, base_url, model_name="local-model"):
 import json
 
 METADATA_FILE = os.path.join(DB_DIR, "rag_metadata.json")
-MAX_DB_SIZE_MB = 100  # 最大サイズ（MB）
+MAX_DB_SIZE_MB = 10000  # 最大サイズ（MB）
 
 def load_rag_metadata():
     """RAGメタデータを読み込む"""
