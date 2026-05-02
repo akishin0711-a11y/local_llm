@@ -1,7 +1,7 @@
 import os
 import shutil
 import streamlit as st
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 import httpx
 import time
 import base64
@@ -17,14 +17,174 @@ from langchain_openai import OpenAIEmbeddings
 
 DB_DIR = "faiss_index"
 
+# --- 外部API・ユーティリティ関数の定義（呼び出しより前に配置） ---
+
+# Yahoo! ローカル検索APIで座標を特定
+def fetch_coordinates(app_id, query):
+    if not app_id or not query:
+        return None, None
+    try:
+        url = "https://map.yahooapis.jp/search/local/V1/localSearch"
+        params = {
+            "appid": app_id,
+            "query": query,
+            "output": "json",
+            "results": 1
+        }
+        with httpx.Client(trust_env=False) as h_client:
+            resp = h_client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "Feature" in data and len(data["Feature"]) > 0:
+                    feature = data["Feature"][0]
+                    return feature["Geometry"]["Coordinates"], feature["Name"]
+    except Exception as e:
+        st.error(f"座標取得中にエラーが発生しました: {e}")
+    return None, None
+
+# Yahoo天気API連携
+def fetch_yahoo_weather(app_id, coordinates):
+    if not app_id:
+        return "Yahoo App IDが設定されていないため、天気情報を取得できません。"
+    try:
+        if ',' not in coordinates:
+            return "座標の形式が正しくありません。 (経度,緯度)"
+            
+        url = "https://map.yahooapis.jp/weather/V1/place"
+        params = {"appid": app_id, "coordinates": coordinates, "output": "json"}
+        with httpx.Client(trust_env=False) as h_client:
+            resp = h_client.get(url, params=params)
+            if resp.status_code != 200:
+                return f"天気情報の取得に失敗しました (HTTP {resp.status_code})"
+            
+            data = resp.json()
+            if 'Feature' not in data or not data['Feature']:
+                return "指定された座標の気象データが見つかりませんでした。"
+            
+            place_name = data['Feature'][0].get('Name', '指定地点')
+            weather_list = data['Feature'][0].get('Property', {}).get('WeatherList', {}).get('Weather', [])
+            
+            lon, lat = coordinates.split(',')
+            map_url = f"https://map.yahoo.co.jp/place?lat={lat}&lon={lon}&zoom=15"
+            
+            res_text = f"【設定された場所の情報】\n地点名: {place_name}\nYahoo!マップ: {map_url}\n\n【天気データ】\n"
+            for w in weather_list:
+                dt = w['Date']
+                time_f = f"{dt[8:10]}:{dt[10:12]}"
+                w_type = "観測値" if w['Type'] == 'observation' else "予測値"
+                res_text += f"- {time_f} ({w_type}): 降水強度 {w['Rainfall']} mm/h\n"
+            return res_text
+    except Exception as e:
+        return f"天気情報の取得中にエラーが発生しました: {str(e)}"
+
+# Yahoo!路線情報から経路詳細を取得
+def fetch_transit_data(from_st, to_st):
+    if not from_st or not to_st:
+        return "出発駅と到着駅を両方設定してください。"
+    try:
+        now = datetime.now()
+        base_url = "https://transit.yahoo.co.jp/search/result"
+        params = {
+            "from": from_st, "to": to_st,
+            "y": now.year, "m": f"{now.month:02d}", "d": f"{now.day:02d}",
+            "hh": f"{now.hour:02d}", "m1": now.minute // 10, "m2": now.minute % 10,
+            "type": 1
+        }
+        with httpx.Client(trust_env=False) as h_client:
+            resp = h_client.get(base_url, params=params)
+            if resp.status_code != 200: return "経路情報の取得に失敗しました。"
+            
+            soup = BeautifulSoup(resp.text, "html.parser")
+            error_text = soup.find("div", class_="alertSearch")
+            if error_text and "は駅名として認識できませんでした。" in error_text.text:
+                return "指定された駅名が見つかりませんでした。"
+
+            route_summary = soup.find("div", class_="routeSummary")
+            if not route_summary: return "該当する経路が見つかりませんでした。"
+
+            time_info = route_summary.find("span", class_="time").text if route_summary.find("span", class_="time") else "不明"
+            fare_info = route_summary.find("li", class_="fare").text if route_summary.find("li", class_="fare") else "不明"
+            transfer_info = route_summary.find("li", class_="transfer").text if route_summary.find("li", class_="transfer") else "不明"
+            
+            return f"【{from_st} から {to_st} への経路】\n- 時間: {time_info}\n- 運賃: {fare_info}\n- 乗換: {transfer_info}\n- 詳細: {resp.url}"
+    except Exception as e:
+        return f"経路検索エラー: {str(e)}"
+
+# 運行情報の取得
+def fetch_operation_status(line_name):
+    if not line_name: return ""
+    try:
+        search_url = f"https://transit.yahoo.co.jp/diainfo/search?q={urllib.parse.quote(line_name)}"
+        with httpx.Client(trust_env=False) as h_client:
+            resp = h_client.get(search_url)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            result_table = soup.find("div", id="mdSearchLineResult")
+            rows = result_table.find_all("tr") if result_table else []
+            if len(rows) > 1:
+                cols = rows[1].find_all("td")
+                return f"【鉄道運行情報】\n対象: {cols[0].text}\n状態: {cols[1].text}\n詳細: {resp.url}\n"
+            return f"「{line_name}」の運行情報を特定できませんでした。"
+    except Exception as e:
+        return f"運行情報取得エラー: {str(e)}"
+
+# 週間予報 (Open-Meteo)
+def fetch_weekly_forecast(coordinates):
+    if not coordinates or ',' not in coordinates: return ""
+    try:
+        lon, lat = coordinates.split(',')
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {"latitude": lat, "longitude": lon, "daily": "weather_code,temperature_2m_max,temperature_2m_min", "timezone": "Asia/Tokyo"}
+        with httpx.Client(trust_env=False) as h_client:
+            resp = h_client.get(url, params=params)
+            if resp.status_code == 200:
+                d = resp.json().get("daily", {})
+                res = "【週間予報】\n"
+                for i in range(len(d.get("time", []))):
+                    res += f"- {d['time'][i]}: {d['temperature_2m_min'][i]}~{d['temperature_2m_max'][i]}℃\n"
+                return res
+    except: pass
+    return ""
+
+# RAGエンジン: 文書をベクトル化
+def build_vector_store(files, base_url, model_name="local-model"):
+    all_text = ""
+    for f in files:
+        if f.type == "application/pdf":
+            reader = PdfReader(f)
+            all_text += f"\n[File: {f.name}]\n" + "\n".join([p.extract_text() for p in reader.pages])
+        elif f.type == "text/plain":
+            all_text += f"\n[File: {f.name}]\n" + f.read().decode("utf-8")
+        f.seek(0)
+    
+    if not all_text.strip(): return None
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = text_splitter.split_text(all_text)
+    
+    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name, check_embedding_ctx_length=False)
+    
+    if os.path.exists(DB_DIR):
+        vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+        vector_db.add_texts(chunks)
+    else:
+        vector_db = FAISS.from_texts(chunks, embeddings)
+    
+    vector_db.save_local(DB_DIR)
+    return vector_db
+
 # GitHub公開用にSecretsから取得するように変更（未設定時はデフォルト値を使用）
-YAHOO_APP_ID = st.secrets.get("YAHOO_APP_ID", "dmVyPTIwMjUwNyZpZD1wZVJpUEo4OFV4Jmhhc2g9TXpJeU5EVTNaVEV4WkRZelltTXdZUQ")
+try:
+    YAHOO_APP_ID = st.secrets["YAHOO_APP_ID"]
+except Exception:
+    # secrets.toml が見つからない場合やキーがない場合のフォールバック
+    YAHOO_APP_ID = "dmVyPTIwMjUwNyZpZD1wZVJpUEo4OFV4Jmhhc2g9TXpJeU5EVTNaVEV4WkRZelltTXdZUQ"
 
 # 1. LM Studioへの接続設定
 @st.cache_resource
 def get_openai_client(base_url):
     # システムのプロキシ設定を無視するように trust_env=False を設定
-    http_client = httpx.Client(trust_env=False)
+    # 接続のタイムアウトを 60秒に延長
+    http_client = httpx.Client(trust_env=False, timeout=60.0)
     return OpenAI(
         base_url=base_url,
         api_key="not-needed",
@@ -40,7 +200,15 @@ with st.sidebar:
     
     # LM StudioのURL設定とクライアントの初期化を先に行う
     # クラウドからの場合は Ngrok 等の公開URLを入力する必要があります
-    lm_url = st.text_input("LM Studio URL / API Endpoint", value="http://127.0.0.1:1234/v1")
+    default_url = "http://127.0.0.1:1234/v1"
+    lm_url = st.text_input("LM Studio URL / API Endpoint", value=default_url)
+    
+    # 外部アクセス（クラウド）かどうかの簡易判定と警告
+    is_cloud = "streamlit.app" in st.query_params or (os.getenv("STREAMLIT_SERVER_ADDRESS") and "127.0.0.1" not in lm_url)
+    if "127.0.0.1" in lm_url and not (st.get_option("server.address") == "localhost" or "localhost" in st.get_option("browser.serverAddress")):
+        st.warning("⚠️ クラウド環境で '127.0.0.1' を使用すると、ローカルの LM Studio に接続できません。")
+        st.info("💡 ヒント: ngrok 等でローカルポートを公開し、その URL を入力してください。")
+
     client = get_openai_client(lm_url)
 
     # --- 機能拡張: ファイルアップローダー ---
@@ -160,218 +328,6 @@ if "messages" not in st.session_state:
 # 音声認識結果がある場合は入力欄のデフォルト値として使うための処理
 input_label = "メッセージを入力してください"
 default_input = st.session_state.get("voice_text", "")
-
-# --- Yahoo! ローカル検索APIで座標を特定 ---
-def fetch_coordinates(app_id, query):
-    if not app_id or not query:
-        return None, None
-    try:
-        url = "https://map.yahooapis.jp/search/local/V1/localSearch"
-        params = {
-            "appid": app_id,
-            "query": query,
-            "output": "json",
-            "results": 1
-        }
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(url, params=params)
-            if resp.status_code == 200:
-                data = resp.json()
-                if "Feature" in data and len(data["Feature"]) > 0:
-                    feature = data["Feature"][0]
-                    # Yahooの座標形式は "経度,緯度"
-                    return feature["Geometry"]["Coordinates"], feature["Name"]
-    except Exception as e:
-        st.error(f"座標取得中にエラーが発生しました: {e}")
-        pass
-    return None, None
-
-# --- Yahoo天気API連携 ---
-def fetch_yahoo_weather(app_id, coordinates):
-    if not app_id:
-        return "Yahoo App IDが設定されていないため、天気情報を取得できません。"
-    try:
-        # Yahoo! JAPAN 気象予報API
-        if ',' not in coordinates:
-            return "座標の形式が正しくありません。 (経度,緯度)"
-            
-        url = "https://map.yahooapis.jp/weather/V1/place"
-        params = {"appid": app_id, "coordinates": coordinates, "output": "json"}
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(url, params=params)
-            if resp.status_code != 200:
-                return f"天気情報の取得に失敗しました (HTTP {resp.status_code})"
-            
-            data = resp.json()
-            if 'Feature' not in data or not data['Feature']:
-                return "指定された座標の気象データが見つかりませんでした。"
-            
-            place_name = data['Feature'][0].get('Name', '指定地点')
-            weather_list = data['Feature'][0].get('Property', {}).get('WeatherList', {}).get('Weather', [])
-            
-            # 地図URLの生成 (Yahoo!マップ)
-            lon, lat = coordinates.split(',')
-            map_url = f"https://map.yahoo.co.jp/place?lat={lat}&lon={lon}&zoom=15"
-            
-            res_text = f"【設定された場所の情報】\n地点名: {place_name}\nYahoo!マップ: {map_url}\n\n【天気データ】\n"
-            for w in weather_list:
-                dt = w['Date']
-                time_f = f"{dt[8:10]}:{dt[10:12]}"
-                w_type = "観測値" if w['Type'] == 'observation' else "予測値"
-                res_text += f"- {time_f} ({w_type}): 降水強度 {w['Rainfall']} mm/h\n"
-            return res_text
-    except Exception as e:
-        return f"天気情報の取得中にエラーが発生しました: {str(e)}"
-
-# --- Yahoo!路線情報から経路詳細を取得 ---
-def fetch_transit_data(from_st, to_st):
-    if not from_st or not to_st:
-        return "出発駅と到着駅を両方設定してください。"
-    try:
-        now = datetime.now()
-        # Yahoo路線検索URLの構築
-        base_url = "https://transit.yahoo.co.jp/search/result"
-        params = {
-            "from": from_st,
-            "to": to_st,
-            "y": now.year, "m": f"{now.month:02d}", "d": f"{now.day:02d}",
-            "hh": f"{now.hour:02d}", "m1": now.minute // 10, "m2": now.minute % 10,
-            "type": 1 # 出発時刻指定
-        }
-        
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(base_url, params=params)
-            if resp.status_code != 200: return "経路情報の取得に失敗しました。"
-            
-            html = resp.text
-            soup = BeautifulSoup(html, "html.parser")
-
-            # 駅名が見つからない場合のエラーメッセージをチェック
-            error_text = soup.find("div", class_="alertSearch")
-            if error_text and "は駅名として認識できませんでした。" in error_text.text:
-                error_msg = "指定された駅名が見つかりませんでした。駅名を確認してください。"
-                if f"「{from_st}」は駅名として認識できませんでした。" in html:
-                    error_msg = f"出発駅「{from_st}」が見つかりませんでした。駅名を確認してください。"
-                elif f"「{to_st}」は駅名として認識できませんでした。" in html:
-                    error_msg = f"到着駅「{to_st}」が見つかりませんでした。駅名を確認してください。"
-                return error_msg
-
-            # 第1経路のサマリーを取得
-            route_summary = soup.find("div", class_="routeSummary")
-            if not route_summary:
-                return "該当する経路が見つかりませんでした。"
-
-            time_info = route_summary.find("span", class_="time").text if route_summary.find("span", class_="time") else "不明"
-            fare_info = route_summary.find("li", class_="fare").text if route_summary.find("li", class_="fare") else "不明"
-            transfer_info = route_summary.find("li", class_="transfer").text if route_summary.find("li", class_="transfer") else "不明"
-            
-            res = f"【{from_st} から {to_st} への経路情報 (現在時刻出発)】\n"
-            res += f"- 時間: {time_info}\n- 運賃: {fare_info}\n- 乗換: {transfer_info}\n"
-            res += f"- 詳細URL: {resp.url}\n"
-            res += "\nこの情報を元に、具体的な乗り換え手順や所要時間をユーザーに分かりやすく回答してください。"
-            
-            return res
-    except Exception as e:
-        return f"経路検索中にエラーが発生しました: {str(e)}"
-
-# --- Yahoo!路線情報から運行情報を取得 ---
-def fetch_operation_status(line_name):
-    if not line_name:
-        return ""
-    try:
-        # 運行情報検索URL
-        search_url = f"https://transit.yahoo.co.jp/diainfo/search?q={urllib.parse.quote(line_name)}"
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(search_url)
-            if resp.status_code != 200:
-                return f"{line_name}の運行情報を取得できませんでした。"
-            
-            html = resp.text
-            soup = BeautifulSoup(html, "html.parser")
-            
-            # 運行情報テーブルの1行目を取得
-            result_table = soup.find("div", id="mdSearchLineResult")
-            rows = result_table.find_all("tr") if result_table else []
-            if len(rows) > 1:
-                first_row = rows[1] # 0はヘッダー
-                cols = first_row.find_all("td")
-                found_line = cols[0].get_text(strip=True) if len(cols) > 0 else "不明"
-                status = cols[1].get_text(strip=True) if len(cols) > 1 else "情報なし"
-                return f"【鉄道運行情報】\n対象路線: {found_line}\n現在の状態: {status}\n詳細: {resp.url}\n"
-            elif "該当する路線が見つかりませんでした" in html:
-                return f"「{line_name}」に該当する路線が見つかりませんでした。"
-            else:
-                return f"{line_name}の具体的なステータスを特定できませんでした。"
-    except Exception as e:
-        return f"運行情報取得エラー: {str(e)}"
-
-# --- 週間天気予報 (Open-Meteo) ---
-def fetch_weekly_forecast(coordinates):
-    if not coordinates or ',' not in coordinates:
-        return ""
-    try:
-        # Yahoo形式 "経度,緯度" を Open-Meteo形式 "緯度,経度" に変換
-        parts = coordinates.split(',')
-        if len(parts) != 2: return ""
-        lon, lat = parts
-        
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
-            "timezone": "Asia/Tokyo"
-        }
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(url, params=params)
-            if resp.status_code == 200:
-                data = resp.json()
-                daily = data.get("daily", {})
-                res = "【今後1週間の天気予報データ】\n"
-                for i in range(len(daily.get("time", []))):
-                    res += f"- {daily['time'][i]}: 天気コード {daily['weather_code'][i]}, 最高{daily['temperature_2m_max'][i]}℃, 最低{daily['temperature_2m_min'][i]}℃, 予想降水量{daily['precipitation_sum'][i]}mm\n"
-                res += "(天気コード参考: 0:快晴, 1-3:晴れ/曇, 61-65:雨, 71-75:雪, 95:雷雨)\n"
-                return res
-    except Exception as e:
-        print(f"週間予報取得エラー: {e}")
-        pass
-    return ""
-
-# --- RAGエンジン: 文書をベクトル化して検索可能にする ---
-def build_vector_store(files, base_url):
-    all_text = ""
-    for f in files:
-        if f.type == "application/pdf":
-            reader = PdfReader(f)
-            all_text += f"\n[File: {f.name}]\n" + "\n".join([p.extract_text() for p in reader.pages])
-        elif f.type == "text/plain":
-            all_text += f"\n[File: {f.name}]\n" + f.read().decode("utf-8")
-        f.seek(0)
-    
-    if not all_text.strip():
-        return None
-
-    # テキストをチャンクに分割
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = text_splitter.split_text(all_text)
-    
-    # LM StudioのEmbeddings APIを使用
-    embeddings = OpenAIEmbeddings(
-        base_url=base_url,
-        api_key="not-needed",
-        check_embedding_ctx_length=False # ローカルモデルの制限に合わせる
-    )
-    
-    # 既存のインデックスがあれば読み込み、なければ新規作成
-    if os.path.exists(DB_DIR):
-        vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-        vector_db.add_texts(chunks)
-    else:
-        vector_db = FAISS.from_texts(chunks, embeddings)
-    
-    # ローカルに保存（蓄積）
-    vector_db.save_local(DB_DIR)
-    return vector_db
 
 # RAG用インデックスの構築
 if use_rag and uploaded_files:
@@ -539,6 +495,10 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
             message_placeholder.markdown(full_response)
             # 応答を履歴に保存
             st.session_state.messages.append({"role": "assistant", "content": full_response})
+        except APIConnectionError as e:
+            st.error("LM Studio サーバーに接続できませんでした。")
+            st.info("💡 対策:\n1. LM Studio の Local Server が ON になっているか確認してください。\n2. クラウド実行中の場合、URL に '127.0.0.1' は使用できません。ngrok 等の公開 URL を入力してください。")
+            print(f"Connection Error: {e}")
         except Exception as e:
             error_msg = f"通信エラーが発生しました: {str(e)}"
             st.error(error_msg)

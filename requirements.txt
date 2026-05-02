@@ -8,3 +8,4 @@ langchain-community
 langchain-openai
 faiss-cpu
 watchdog
+urllib3<2.0.0
