@@ -5,15 +5,23 @@ from openai import OpenAI, APIConnectionError
 import httpx
 import time
 import base64
-import io
 from PyPDF2 import PdfReader
 from datetime import datetime
+try:
+    from icalendar import Calendar
+except ImportError:
+    Calendar = None
 import urllib.parse
-import re
 from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
+
+# GitHub公開用にSecretsから取得するように変更（未設定時はデフォルト値を使用）
+try:
+    YAHOO_APP_ID = st.secrets["YAHOO_APP_ID"]
+except Exception:
+    YAHOO_APP_ID = "dmVyPTIwMjUwNyZpZD1wZVJpUEo4OFV4Jmhhc2g9TXpJeU5EVTNaVEV4WkRZelltTXdZUQ"
 
 DB_DIR = "faiss_index"
 
@@ -106,7 +114,10 @@ def fetch_transit_data(from_st, to_st):
             
             # 候補選択画面が表示された場合
             if "searchSelect" in resp.text:
-                return f"「{from_st}」または「{to_st}」に複数の候補があります。より正確な駅名（例: 新宿駅）を入力してください。"
+                soup_sel = BeautifulSoup(resp.text, "html.parser")
+                candidates = [td.get_text(strip=True) for td in soup_sel.find_all("td", class_="station")]
+                cand_str = "、".join(candidates[:3])
+                return f"「{from_st}」または「{to_st}」に複数の候補（{cand_str}など）があります。正確な駅名を入力してください。"
 
             route_summary = soup.find("div", class_="routeSummary")
             if not route_summary: return "該当する経路が見つかりませんでした。駅名が正しいか確認してください。"
@@ -153,7 +164,11 @@ def fetch_weekly_forecast(coordinates):
                 for i in range(len(d.get("time", []))):
                     res += f"- {d['time'][i]}: {d['temperature_2m_min'][i]}~{d['temperature_2m_max'][i]}℃\n"
                 return res
-    except: pass
+            else:
+                return ""
+    except Exception:
+        # 予報取得に失敗した場合は空文字を返す
+        return ""
     return ""
 
 # RAGエンジン: 文書をベクトル化
@@ -165,6 +180,23 @@ def build_vector_store(files, base_url, model_name="local-model"):
             all_text += f"\n[File: {f.name}]\n" + "\n".join([p.extract_text() for p in reader.pages])
         elif f.type == "text/plain":
             all_text += f"\n[File: {f.name}]\n" + f.read().decode("utf-8")
+        elif f.type == "text/calendar" or f.name.endswith(".ics"):
+            if Calendar is None:
+                st.error(f"icalendar ライブラリが未インストールのため {f.name} をスキップしました。")
+                continue
+            try:
+                # カレンダーファイルの解析
+                cal = Calendar.from_ical(f.read())
+                all_text += f"\n[Calendar File: {f.name}]\n"
+                for component in cal.walk():
+                    if component.name == "VEVENT":
+                        summary = component.get('summary')
+                        start = component.get('dtstart').dt if component.get('dtstart') else "不明"
+                        end = component.get('dtend').dt if component.get('dtend') else "不明"
+                        loc = component.get('location', '未設定')
+                        all_text += f"- 予定: {summary}, 開始: {start}, 終了: {end}, 場所: {loc}\n"
+            except Exception as e:
+                st.error(f"カレンダーの解析に失敗しました ({f.name}): {e}")
         f.seek(0)
     
     if not all_text.strip(): return None
@@ -172,7 +204,7 @@ def build_vector_store(files, base_url, model_name="local-model"):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_text(all_text)
     
-    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name, check_embedding_ctx_length=False)
+    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
     
     if os.path.exists(DB_DIR):
         vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
@@ -182,13 +214,6 @@ def build_vector_store(files, base_url, model_name="local-model"):
     
     vector_db.save_local(DB_DIR)
     return vector_db
-
-# GitHub公開用にSecretsから取得するように変更（未設定時はデフォルト値を使用）
-try:
-    YAHOO_APP_ID = st.secrets["YAHOO_APP_ID"]
-except Exception:
-    # secrets.toml が見つからない場合やキーがない場合のフォールバック
-    YAHOO_APP_ID = "dmVyPTIwMjUwNyZpZD1wZVJpUEo4OFV4Jmhhc2g9TXpJeU5EVTNaVEV4WkRZelltTXdZUQ"
 
 # 1. LM Studioへの接続設定
 @st.cache_resource
@@ -225,8 +250,8 @@ with st.sidebar:
     # --- 機能拡張: ファイルアップローダー ---
     st.subheader("📁 Upload Files")
     uploaded_files = st.file_uploader(
-        "画像、PDF、テキストをアップロード", 
-        type=["png", "jpg", "jpeg", "pdf", "txt"], 
+        "画像、PDF、テキスト、カレンダー(ics)をアップロード", 
+        type=["png", "jpg", "jpeg", "pdf", "txt", "ics"], 
         accept_multiple_files=True
     )
     
@@ -348,7 +373,6 @@ if "messages" not in st.session_state:
 
 # 音声認識結果がある場合は入力欄のデフォルト値として使うための処理
 input_label = "メッセージを入力してください"
-default_input = st.session_state.get("voice_text", "")
 
 # RAG用インデックスの構築
 if use_rag and uploaded_files:
@@ -368,7 +392,6 @@ if use_rag and st.session_state.get("vector_db") is None:
                 base_url=lm_url, 
                 api_key="not-needed", 
                 model=embedding_model,
-                check_embedding_ctx_length=False
             )
             st.session_state.vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
         except Exception as e:
@@ -399,7 +422,10 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
     content_list = [{"type": "text", "text": prompt}]
 
     # --- RAG検索ロジック ---
-    external_context = ""
+    # AIが「今日」や「明日」を正しく判定できるように、現在の日時を常に注入します
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
+    external_context = f"【現在の日時】\n{current_time_str}\n"
+
     if use_rag and st.session_state.get("vector_db"):
         with st.spinner("知識ベースを検索中..."):
             # 関連する上位3チャンクを取得
@@ -524,9 +550,6 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
         except APIConnectionError as e:
             st.error("LM Studio サーバーに接続できませんでした。")
             st.info("💡 対策:\n1. LM Studio の Local Server が ON になっているか確認してください。\n2. クラウド実行中の場合、URL に '127.0.0.1' は使用できません。ngrok 等の公開 URL を入力してください。")
-            print(f"Connection Error: {e}")
         except Exception as e:
             error_msg = f"通信エラーが発生しました: {str(e)}"
             st.error(error_msg)
-            # コンソールにも詳細を出力してデバッグしやすくする
-            print(error_msg)
