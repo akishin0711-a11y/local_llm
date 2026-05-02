@@ -1,0 +1,10 @@
+streamlit
+openai
+httpx
+PyPDF2
+beautifulsoup4
+langchain-text-splitters
+langchain-community
+langchain-openai
+faiss-cpu
+watchdog
