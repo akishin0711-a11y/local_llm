@@ -79,6 +79,8 @@ def fetch_yahoo_weather(app_id, coordinates):
 
 # Yahoo!路線情報から経路詳細を取得
 def fetch_transit_data(from_st, to_st):
+    from_st = from_st.strip()
+    to_st = to_st.strip()
     if not from_st or not to_st:
         return "出発駅と到着駅を両方設定してください。"
     try:
@@ -90,21 +92,28 @@ def fetch_transit_data(from_st, to_st):
             "hh": f"{now.hour:02d}", "m1": now.minute // 10, "m2": now.minute % 10,
             "type": 1
         }
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(base_url, params=params)
-            if resp.status_code != 200: return "経路情報の取得に失敗しました。"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        with httpx.Client(trust_env=False, follow_redirects=True) as h_client:
+            resp = h_client.get(base_url, params=params, headers=headers)
+            if resp.status_code != 200: return f"経路情報の取得に失敗しました (HTTP {resp.status_code})"
             
             soup = BeautifulSoup(resp.text, "html.parser")
-            error_text = soup.find("div", class_="alertSearch")
-            if error_text and "は駅名として認識できませんでした。" in error_text.text:
-                return "指定された駅名が見つかりませんでした。"
+            
+            # エラーメッセージの取得
+            error_div = soup.find("div", class_="alertSearch")
+            if error_div:
+                return f"検索エラー: {error_div.get_text(strip=True)}"
+            
+            # 候補選択画面が表示された場合
+            if "searchSelect" in resp.text:
+                return f"「{from_st}」または「{to_st}」に複数の候補があります。より正確な駅名（例: 新宿駅）を入力してください。"
 
             route_summary = soup.find("div", class_="routeSummary")
-            if not route_summary: return "該当する経路が見つかりませんでした。"
+            if not route_summary: return "該当する経路が見つかりませんでした。駅名が正しいか確認してください。"
 
-            time_info = route_summary.find("span", class_="time").text if route_summary.find("span", class_="time") else "不明"
-            fare_info = route_summary.find("li", class_="fare").text if route_summary.find("li", class_="fare") else "不明"
-            transfer_info = route_summary.find("li", class_="transfer").text if route_summary.find("li", class_="transfer") else "不明"
+            time_info = route_summary.find("span", class_="time").get_text(strip=True) if route_summary.find("span", class_="time") else "不明"
+            fare_info = route_summary.find("li", class_="fare").get_text(strip=True) if route_summary.find("li", class_="fare") else "不明"
+            transfer_info = route_summary.find("li", class_="transfer").get_text(strip=True) if route_summary.find("li", class_="transfer") else "不明"
             
             return f"【{from_st} から {to_st} への経路】\n- 時間: {time_info}\n- 運賃: {fare_info}\n- 乗換: {transfer_info}\n- 詳細: {resp.url}"
     except Exception as e:
@@ -112,11 +121,13 @@ def fetch_transit_data(from_st, to_st):
 
 # 運行情報の取得
 def fetch_operation_status(line_name):
+    line_name = line_name.strip()
     if not line_name: return ""
     try:
         search_url = f"https://transit.yahoo.co.jp/diainfo/search?q={urllib.parse.quote(line_name)}"
-        with httpx.Client(trust_env=False) as h_client:
-            resp = h_client.get(search_url)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        with httpx.Client(trust_env=False, follow_redirects=True) as h_client:
+            resp = h_client.get(search_url, headers=headers)
             soup = BeautifulSoup(resp.text, "html.parser")
             result_table = soup.find("div", id="mdSearchLineResult")
             rows = result_table.find_all("tr") if result_table else []
@@ -237,7 +248,7 @@ with st.sidebar:
         except Exception as e:
             st.error("LM Studio に接続できません。")
             if "127.0.0.1" in lm_url or "localhost" in lm_url:
-                st.info("💡 ローカルのアドレスを指定していますが、サーバーがクラウド上にある可能性があります。")
+                st.info("💡 ローカルのアドレスを指定していますが、サーバーがクラウド上にある可能性があります。ngrok 等を使用するか、ローカルで `streamlit run` を実行してください。")
             else:
                 st.info(f"詳細エラー: {e}")
             selected_model = "local-model"
