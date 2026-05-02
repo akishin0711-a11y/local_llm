@@ -222,19 +222,26 @@ with st.sidebar:
     # 接続確認とモデル一覧の取得
     st.subheader("🤖 Model Selection")
     embedding_model = "local-model" # デフォルト値
-    try:
-        models = client.models.list()
-        model_list = [m.id for m in models.data] if models.data else []
-        if model_list:
-            selected_model = st.selectbox("Select Model", model_list)
-            # Embedding用モデルが別にある場合は選択できるようにするか、ロード中のものを推測
-            embedding_model = st.selectbox("Select Embedding Model", model_list, index=0)
-            st.success("LM Studio に接続中")
-        else:
-            st.warning("モデルが見つかりません。LM Studioでロードしてください。")
+    if lm_url:
+        try:
+            models = client.models.list()
+            model_list = [m.id for m in models.data] if models.data else []
+            if model_list:
+                selected_model = st.selectbox("Select Model", model_list)
+                # Embedding用モデルが別にある場合は選択できるようにするか、ロード中のものを推測
+                embedding_model = st.selectbox("Select Embedding Model", model_list, index=0)
+                st.success("LM Studio に接続中")
+            else:
+                st.warning("モデルが見つかりません。LM Studioでロードしてください。")
+                selected_model = "local-model"
+        except Exception as e:
+            st.error("LM Studio に接続できません。")
+            if "127.0.0.1" in lm_url or "localhost" in lm_url:
+                st.info("💡 ローカルのアドレスを指定していますが、サーバーがクラウド上にある可能性があります。")
+            else:
+                st.info(f"詳細エラー: {e}")
             selected_model = "local-model"
-    except Exception as e:
-        st.error(f"LM Studio に接続できません: {e}")
+    else:
         selected_model = "local-model"
 
     # --- 機能拡張: 音声入力 ---
