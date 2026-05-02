@@ -221,11 +221,14 @@ with st.sidebar:
     
     # 接続確認とモデル一覧の取得
     st.subheader("🤖 Model Selection")
+    embedding_model = "local-model" # デフォルト値
     try:
         models = client.models.list()
         model_list = [m.id for m in models.data] if models.data else []
         if model_list:
             selected_model = st.selectbox("Select Model", model_list)
+            # Embedding用モデルが別にある場合は選択できるようにするか、ロード中のものを推測
+            embedding_model = st.selectbox("Select Embedding Model", model_list, index=0)
             st.success("LM Studio に接続中")
         else:
             st.warning("モデルが見つかりません。LM Studioでロードしてください。")
@@ -334,7 +337,7 @@ if use_rag and uploaded_files:
     file_ids = "".join([f.name + str(f.size) for f in uploaded_files])
     if "last_file_ids" not in st.session_state or st.session_state.last_file_ids != file_ids:
         with st.spinner("文書をインデックス中..."):
-            st.session_state.vector_db = build_vector_store(uploaded_files, lm_url)
+            st.session_state.vector_db = build_vector_store(uploaded_files, lm_url, model_name=embedding_model)
             st.session_state.last_file_ids = file_ids
             if st.session_state.vector_db:
                 st.success("データを蓄積しました")
@@ -343,7 +346,12 @@ if use_rag and uploaded_files:
 if use_rag and st.session_state.get("vector_db") is None:
     if os.path.exists(DB_DIR):
         try:
-            embeddings = OpenAIEmbeddings(base_url=lm_url, api_key="not-needed", check_embedding_ctx_length=False)
+            embeddings = OpenAIEmbeddings(
+                base_url=lm_url, 
+                api_key="not-needed", 
+                model=embedding_model,
+                check_embedding_ctx_length=False
+            )
             st.session_state.vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
         except Exception as e:
             st.error(f"蓄積データの読み込み失敗: {e}")
