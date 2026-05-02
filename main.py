@@ -204,9 +204,9 @@ with st.sidebar:
     lm_url = st.text_input("LM Studio URL / API Endpoint", value=default_url)
     
     # 外部アクセス（クラウド）かどうかの簡易判定と警告
-    is_cloud = "streamlit.app" in st.query_params or (os.getenv("STREAMLIT_SERVER_ADDRESS") and "127.0.0.1" not in lm_url)
-    if "127.0.0.1" in lm_url and not (st.get_option("server.address") == "localhost" or "localhost" in st.get_option("browser.serverAddress")):
-        st.warning("⚠️ クラウド環境で '127.0.0.1' を使用すると、ローカルの LM Studio に接続できません。")
+    is_running_on_cloud = os.getenv("STREAMLIT_SERVER_PORT") is None or "streamlit.app" in st.get_option("browser.serverAddress")
+    if is_running_on_cloud and ("127.0.0.1" in lm_url or "localhost" in lm_url):
+        st.error("⚠️ 接続エラーの原因: クラウド環境からローカルの '127.0.0.1' には接続できません。")
         st.info("💡 ヒント: ngrok 等でローカルポートを公開し、その URL を入力してください。")
 
     client = get_openai_client(lm_url)
