@@ -7,6 +7,7 @@ import time
 import base64
 from PyPDF2 import PdfReader
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from icalendar import Calendar
 import urllib.parse
 from bs4 import BeautifulSoup
@@ -83,13 +84,17 @@ def fetch_yahoo_weather(app_id, coordinates):
         return f"天気情報の取得中にエラーが発生しました: {str(e)}"
 
 # Yahoo!路線情報から経路詳細を取得
+def get_tokyo_now():
+    return datetime.now(ZoneInfo("Asia/Tokyo"))
+
+
 def fetch_transit_data(from_st, to_st):
     from_st = from_st.strip()
     to_st = to_st.strip()
     if not from_st or not to_st:
         return "出発駅と到着駅を両方設定してください。"
     try:
-        now = datetime.now()
+        now = get_tokyo_now()
         base_url = "https://transit.yahoo.co.jp/search/result"
         params = {
             "from": from_st, "to": to_st,
@@ -424,7 +429,7 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
 
     # --- RAG検索ロジック ---
     # AIが「今日」や「明日」を正しく判定できるように、現在の日時を常に注入します
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
+    current_time_str = get_tokyo_now().strftime("%Y-%m-%d %H:%M:%S (%A)")
     external_context = f"【現在の日時】\n{current_time_str}\n"
 
     if use_rag and st.session_state.get("vector_db"):
