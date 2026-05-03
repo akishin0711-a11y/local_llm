@@ -183,6 +183,14 @@ def register_new_chunks(chunks):
     save_rag_metadata(metadata)
 
 
+def remove_invalid_faiss_index():
+    if os.path.exists(DB_DIR):
+        try:
+            shutil.rmtree(DB_DIR)
+        except Exception:
+            pass
+
+
 def build_vector_store(files, base_url, model_name="local-model"):
     all_text = ""
     os.makedirs(DB_DIR, exist_ok=True)
@@ -222,8 +230,12 @@ def build_vector_store(files, base_url, model_name="local-model"):
     
     try:
         if os.path.exists(DB_DIR):
-            vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-            vector_db.add_texts(chunks)
+            try:
+                vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+                vector_db.add_texts(chunks)
+            except Exception:
+                remove_invalid_faiss_index()
+                vector_db = FAISS.from_texts(chunks, embeddings)
         else:
             vector_db = FAISS.from_texts(chunks, embeddings)
         vector_db.save_local(DB_DIR)
@@ -537,14 +549,18 @@ if use_rag and uploaded_files:
 if use_rag and st.session_state.get("vector_db") is None:
     if os.path.exists(DB_DIR):
         try:
-            embeddings = OpenAIEmbeddings(
-                base_url=lm_url, 
-                api_key="not-needed", 
-                model=embedding_model,
-            )
-            st.session_state.vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+            if not os.path.exists(os.path.join(DB_DIR, "index.faiss")):
+                remove_invalid_faiss_index()
+            else:
+                embeddings = OpenAIEmbeddings(
+                    base_url=lm_url, 
+                    api_key="not-needed", 
+                    model=embedding_model,
+                )
+                st.session_state.vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
         except Exception as e:
-            st.error(f"蓄積データの読み込み失敗: {e}")
+            remove_invalid_faiss_index()
+            st.warning(f"蓄積データの読み込み失敗: {e}。破損したインデックスを削除しました。再度アップロードしてください。")
 
 # 3. 履歴の表示 (最新のStreamlit chat UIを使用)
 # システムメッセージはUIに表示せず、背後で管理します
