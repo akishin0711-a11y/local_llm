@@ -28,6 +28,10 @@ class LocalSentenceTransformerEmbeddings:
     def embed_query(self, text):
         """クエリの埋め込みを生成"""
         return self.model.encode([text], convert_to_numpy=True).tolist()[0]
+    
+    def __call__(self, text):
+        """呼び出し可能にする"""
+        return self.embed_query(text)
 
 # --- RAG用Embeddings取得関数 ---
 def get_embeddings_for_rag(base_url, model_name="local-model"):
