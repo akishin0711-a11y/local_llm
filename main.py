@@ -245,6 +245,50 @@ def build_vector_store(files, base_url, model_name="local-model"):
         st.error(f"RAGインデックスの保存に失敗しました: {e}")
         return None
 
+def add_chat_history_to_rag(base_url, model_name="local-model"):
+    """チャット履歴をRAGインデックスに追加"""
+    if not st.session_state.get("messages"):
+        return False
+    
+    # チャット履歴をテキスト化
+    history_text = ""
+    for msg in st.session_state.messages:
+        role = "ユーザー" if msg["role"] == "user" else "AI"
+        if isinstance(msg["content"], list):
+            content = ""
+            for item in msg["content"]:
+                if item["type"] == "text":
+                    content += item["text"]
+                elif item["type"] == "image_url":
+                    content += "[画像が添付されました]"
+        else:
+            content = msg["content"]
+        history_text += f"\n[{role}]\n{content}\n"
+    
+    if not history_text.strip():
+        return False
+    
+    # テキストをチャンク化
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = text_splitter.split_text(history_text)
+    
+    # RAGインデックスに追加
+    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
+    
+    try:
+        if os.path.exists(DB_DIR):
+            vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+            vector_db.add_texts(chunks)
+        else:
+            vector_db = FAISS.from_texts(chunks, embeddings)
+        
+        vector_db.save_local(DB_DIR)
+        register_new_chunks(chunks)
+        return True
+    except Exception as e:
+        st.error(f"チャット履歴のRAG追加に失敗: {e}")
+        return False
+
 # --- RAG メタデータ管理 ---
 import json
 
@@ -461,6 +505,8 @@ with st.sidebar:
                 with st.expander("📈 使用頻度トップ 3"):
                     for i, (chunk_id, info) in enumerate(top_chunks, 1):
                         st.caption(f"{i}. 使用回数: {info['count']} 回 | 最終使用: {info['last_used'][:10] if info['last_used'] else '未使用'}")
+        else:
+            st.caption("📊 登録チャンク数: 0（RAGインデックス未作成）")
         
         if st.button("🗑️ 蓄積データをクリア"):
             if os.path.exists(DB_DIR):
@@ -468,6 +514,35 @@ with st.sidebar:
             if "vector_db" in st.session_state:
                 st.session_state.vector_db = None
             st.success("蓄積データを削除しました")
+        
+        # RAGインデックス強制再構築
+        if st.button("🔄 RAGインデックス再構築", key="rebuild_rag"):
+            if uploaded_files:
+                with st.spinner("RAGインデックスを再構築中..."):
+                    remove_invalid_faiss_index()
+                    st.session_state.vector_db = build_vector_store(uploaded_files, lm_url, model_name=embedding_model)
+                    if st.session_state.vector_db:
+                        st.success("✅ RAGインデックスを再構築しました")
+                        st.rerun()
+                    else:
+                        st.error("❌ RAGインデックスの再構築に失敗しました")
+            else:
+                st.warning("⚠️ 再構築するにはファイルをアップロードしてください")
+        
+        # チャット履歴をRAGに追加
+        if st.button("📝 チャット履歴をRAGに追加", key="add_history_to_rag"):
+            if st.session_state.get("messages"):
+                with st.spinner("チャット履歴をRAGに追加中..."):
+                    if add_chat_history_to_rag(lm_url, embedding_model):
+                        st.success("✅ チャット履歴をRAGに追加しました")
+                        st.rerun()
+                    else:
+                        st.error("❌ チャット履歴の追加に失敗しました")
+            else:
+                st.info("ℹ️ チャット履歴がありません")
+        
+        # 自動RAG追加設定
+        auto_add_history = st.checkbox("自動RAG追加", help="会話が10回を超えると自動で履歴をRAGに追加します", value=False)
 
     st.divider()
     st.subheader("☀️ Weather Settings")
@@ -721,6 +796,13 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
             message_placeholder.markdown(full_response)
             # 応答を履歴に保存
             st.session_state.messages.append({"role": "assistant", "content": full_response})
+            
+            # 自動RAG追加チェック
+            if auto_add_history and len(st.session_state.messages) >= 20:  # ユーザー+AIで10往復
+                if not st.session_state.get("history_added_to_rag", False):
+                    if add_chat_history_to_rag(lm_url, embedding_model):
+                        st.session_state.history_added_to_rag = True
+                        st.info("💡 チャット履歴をRAGに自動追加しました")
         except APIConnectionError as e:
             st.error("LM Studio サーバーに接続できませんでした。")
             st.info("💡 対策:\n1. LM Studio の Local Server が ON になっているか確認してください。\n2. クラウド実行中の場合、URL に '127.0.0.1' は使用できません。ngrok 等の公開 URL を入力してください。")
