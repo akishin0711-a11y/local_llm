@@ -31,25 +31,15 @@ class LocalSentenceTransformerEmbeddings:
 
 # --- RAG用Embeddings取得関数 ---
 def get_embeddings_for_rag(base_url, model_name="local-model"):
-    """RAG用のembeddingsを取得（LM Studio優先、失敗したらローカル代替）"""
+    """RAG用のembeddingsを取得（ローカルのsentence-transformersを使用）"""
     try:
-        # まずLM StudioのOpenAI互換embeddingsを試す
-        embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
-        # テスト実行
-        test_result = embeddings.embed_query("test")
-        st.info(f"✅ LM Studio embeddings使用: {len(test_result)}次元")
-        return embeddings
-    except Exception as e:
-        st.warning(f"⚠️ LM Studio embeddingsが利用できない: {e}")
-        st.info("🔄 ローカルのsentence-transformersを使用します")
-        try:
-            local_embeddings = LocalSentenceTransformerEmbeddings()
-            test_result = local_embeddings.embed_query("test")
-            st.info(f"✅ ローカルembeddings使用: {len(test_result)}次元")
-            return local_embeddings
-        except Exception as local_e:
-            st.error(f"❌ ローカルembeddingsも利用できない: {local_e}")
-            raise Exception("embeddingsが利用できません")
+        local_embeddings = LocalSentenceTransformerEmbeddings()
+        test_result = local_embeddings.embed_query("test")
+        st.info(f"✅ ローカルembeddings使用: {len(test_result)}次元")
+        return local_embeddings
+    except Exception as local_e:
+        st.error(f"❌ ローカルembeddingsも利用できない: {local_e}")
+        raise Exception("embeddingsが利用できません")
 
 # GitHub公開用にSecretsから取得するように変更（未設定時はデフォルト値を使用）
 try:
