@@ -11,9 +11,45 @@ from zoneinfo import ZoneInfo
 from icalendar import Calendar
 import urllib.parse
 from bs4 import BeautifulSoup
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
+
+# --- 代替Embeddingsクラス ---
+class LocalSentenceTransformerEmbeddings:
+    def __init__(self, model_name="all-MiniLM-L6-v2"):
+        self.model = SentenceTransformer(model_name)
+    
+    def embed_documents(self, texts):
+        """文書の埋め込みを生成"""
+        return self.model.encode(texts, convert_to_numpy=True).tolist()
+    
+    def embed_query(self, text):
+        """クエリの埋め込みを生成"""
+        return self.model.encode([text], convert_to_numpy=True).tolist()[0]
+
+# --- RAG用Embeddings取得関数 ---
+def get_embeddings_for_rag(base_url, model_name="local-model"):
+    """RAG用のembeddingsを取得（LM Studio優先、失敗したらローカル代替）"""
+    try:
+        # まずLM StudioのOpenAI互換embeddingsを試す
+        embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
+        # テスト実行
+        test_result = embeddings.embed_query("test")
+        st.info(f"✅ LM Studio embeddings使用: {len(test_result)}次元")
+        return embeddings
+    except Exception as e:
+        st.warning(f"⚠️ LM Studio embeddingsが利用できない: {e}")
+        st.info("🔄 ローカルのsentence-transformersを使用します")
+        try:
+            local_embeddings = LocalSentenceTransformerEmbeddings()
+            test_result = local_embeddings.embed_query("test")
+            st.info(f"✅ ローカルembeddings使用: {len(test_result)}次元")
+            return local_embeddings
+        except Exception as local_e:
+            st.error(f"❌ ローカルembeddingsも利用できない: {local_e}")
+            raise Exception("embeddingsが利用できません")
 
 # GitHub公開用にSecretsから取得するように変更（未設定時はデフォルト値を使用）
 try:
@@ -226,7 +262,7 @@ def build_vector_store(files, base_url, model_name="local-model"):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_text(all_text)
     
-    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
+    embeddings = get_embeddings_for_rag(base_url, model_name)
     
     try:
         if os.path.exists(DB_DIR):
@@ -276,16 +312,38 @@ def add_chat_history_to_rag(base_url, model_name="local-model"):
         # テキストをチャンク化
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = text_splitter.split_text(history_text)
+        
+        # デバッグ: chunksの内容を確認
         st.info(f"📊 {len(chunks)} 個のチャンクに分割しました")
+        if chunks:
+            st.info(f"最初のチャンク: {chunks[0][:200]}...")
+        else:
+            st.error("❌ チャンクが空です")
+            return False
+        
+        # 空のチャンクをフィルタリング
+        chunks = [chunk for chunk in chunks if chunk.strip()]
+        if not chunks:
+            st.warning("⚠️ 有効なチャンクがありません")
+            return False
+        
+        st.info(f"📊 有効なチャンク数: {len(chunks)}")
         
         # RAGインデックスに追加
-        embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
+        embeddings = get_embeddings_for_rag(base_url, model_name)
         
         if os.path.exists(DB_DIR):
             vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
             vector_db.add_texts(chunks)
             st.info("✅ 既存のRAGインデックスに追加しました")
         else:
+            # デバッグ: from_textsの前にchunksを確認
+            st.info(f"🔍 新しいインデックス作成: chunksタイプ={type(chunks)}, 長さ={len(chunks)}")
+            for i, chunk in enumerate(chunks[:3]):  # 最初の3つだけ表示
+                st.info(f"  チャンク{i}: タイプ={type(chunk)}, 長さ={len(chunk) if isinstance(chunk, str) else 'N/A'}")
+                if isinstance(chunk, str):
+                    st.info(f"    内容: {chunk[:100]}...")
+            
             vector_db = FAISS.from_texts(chunks, embeddings)
             st.info("✅ 新しいRAGインデックスを作成しました")
         
@@ -635,11 +693,7 @@ if use_rag and st.session_state.get("vector_db") is None:
             if not os.path.exists(os.path.join(DB_DIR, "index.faiss")):
                 remove_invalid_faiss_index()
             else:
-                embeddings = OpenAIEmbeddings(
-                    base_url=lm_url, 
-                    api_key="not-needed", 
-                    model=embedding_model,
-                )
+                embeddings = get_embeddings_for_rag(lm_url, embedding_model)
                 st.session_state.vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
         except Exception as e:
             remove_invalid_faiss_index()
