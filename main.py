@@ -572,8 +572,6 @@ for msg in st.session_state.messages:
                     st.markdown(item["text"])
                 elif item["type"] == "image_url":
                     st.image(item["image_url"]["url"])
-                elif item["type"] == "image":
-                    st.image(item["image"]["image_url"]["url"], caption=item["image"].get("alt", None))
         else:
             st.markdown(msg["content"])
 
@@ -641,11 +639,8 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
                 base64_image = base64.b64encode(img_bytes).decode('utf-8')
                 f.seek(0)  # 後続の st.image(f) で画像を表示するためにポインタを先頭に戻す
                 content_list.append({
-                    "type": "image",
-                    "image": {
-                        "image_url": {"url": f"data:{f.type};base64,{base64_image}"},
-                        "alt": f"Uploaded image: {f.name}"
-                    }
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{f.type};base64,{base64_image}"}
                 })
             elif f.type == "application/pdf":
                 reader = PdfReader(f)
