@@ -466,7 +466,7 @@ with st.sidebar:
     
     # LM StudioのURL設定とクライアントの初期化を先に行う
     # クラウドからの場合は Ngrok 等の公開URLを入力する必要があります
-    default_url = "http://127.0.0.1:1234/v1"
+    default_url = "https://grudge-palatable-saddling.ngrok-free.dev/v1"
     lm_url = st.text_input("LM Studio URL / API Endpoint", value=default_url)
     
     # 外部アクセス（クラウド）かどうかの簡易判定と警告
