@@ -247,46 +247,56 @@ def build_vector_store(files, base_url, model_name="local-model"):
 
 def add_chat_history_to_rag(base_url, model_name="local-model"):
     """チャット履歴をRAGインデックスに追加"""
-    if not st.session_state.get("messages"):
-        return False
-    
-    # チャット履歴をテキスト化
-    history_text = ""
-    for msg in st.session_state.messages:
-        role = "ユーザー" if msg["role"] == "user" else "AI"
-        if isinstance(msg["content"], list):
-            content = ""
-            for item in msg["content"]:
-                if item["type"] == "text":
-                    content += item["text"]
-                elif item["type"] == "image_url":
-                    content += "[画像が添付されました]"
-        else:
-            content = msg["content"]
-        history_text += f"\n[{role}]\n{content}\n"
-    
-    if not history_text.strip():
-        return False
-    
-    # テキストをチャンク化
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = text_splitter.split_text(history_text)
-    
-    # RAGインデックスに追加
-    embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
-    
     try:
+        if not st.session_state.get("messages"):
+            st.warning("⚠️ チャット履歴がありません")
+            return False
+        
+        # チャット履歴をテキスト化
+        history_text = ""
+        for msg in st.session_state.messages:
+            role = "ユーザー" if msg["role"] == "user" else "AI"
+            if isinstance(msg["content"], list):
+                content = ""
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        content += item["text"]
+                    elif item["type"] == "image_url":
+                        content += "[画像が添付されました]"
+            else:
+                content = msg["content"]
+            history_text += f"\n[{role}]\n{content}\n"
+        
+        if not history_text.strip():
+            st.warning("⚠️ チャット履歴が空です")
+            return False
+        
+        st.info(f"📝 チャット履歴を処理中... ({len(history_text)} 文字)")
+        
+        # テキストをチャンク化
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = text_splitter.split_text(history_text)
+        st.info(f"📊 {len(chunks)} 個のチャンクに分割しました")
+        
+        # RAGインデックスに追加
+        embeddings = OpenAIEmbeddings(base_url=base_url, api_key="not-needed", model=model_name)
+        
         if os.path.exists(DB_DIR):
             vector_db = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
             vector_db.add_texts(chunks)
+            st.info("✅ 既存のRAGインデックスに追加しました")
         else:
             vector_db = FAISS.from_texts(chunks, embeddings)
+            st.info("✅ 新しいRAGインデックスを作成しました")
         
         vector_db.save_local(DB_DIR)
         register_new_chunks(chunks)
+        st.success(f"✅ チャット履歴をRAGに追加しました ({len(chunks)} チャンク)")
         return True
     except Exception as e:
-        st.error(f"チャット履歴のRAG追加に失敗: {e}")
+        st.error(f"❌ チャット履歴のRAG追加に失敗: {type(e).__name__}: {e}")
+        import traceback
+        st.error(f"詳細: {traceback.format_exc()}")
         return False
 
 # --- RAG メタデータ管理 ---
@@ -533,11 +543,9 @@ with st.sidebar:
         if st.button("📝 チャット履歴をRAGに追加", key="add_history_to_rag"):
             if st.session_state.get("messages"):
                 with st.spinner("チャット履歴をRAGに追加中..."):
-                    if add_chat_history_to_rag(lm_url, embedding_model):
-                        st.success("✅ チャット履歴をRAGに追加しました")
-                        st.rerun()
-                    else:
-                        st.error("❌ チャット履歴の追加に失敗しました")
+                    success = add_chat_history_to_rag(lm_url, embedding_model)
+                    if success:
+                        st.rerun()  # 容量表示を更新
             else:
                 st.info("ℹ️ チャット履歴がありません")
         
