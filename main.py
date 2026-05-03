@@ -410,11 +410,13 @@ with st.sidebar:
     st.divider()
     
     # --- OCR設定 ---
-    col_opt1, col_opt2 = st.columns(2)
+    col_opt1, col_opt2, col_opt3 = st.columns(3)
     with col_opt1:
         ocr_mode = st.checkbox("OCRモード", help="画像からのテキスト抽出に特化します")
     with col_opt2:
         use_rag = st.checkbox("RAGモード", help="大規模な文書から関連箇所を検索して回答します", value=True)
+    with col_opt3:
+        use_image_analysis = st.checkbox("画像分析モード", help="アップロードした画像をチャットに送信して分析します", value=True)
     
     if use_rag:
         st.info(f"📂 蓄積場所: `{DB_DIR}/`")
@@ -519,7 +521,8 @@ if "messages" not in st.session_state:
 
 # 音声認識結果がある場合は入力欄のデフォルト値として使うための処理
 input_label = "メッセージを入力してください"
-
+if uploaded_files and use_image_analysis:
+    input_label = "画像分析の指示を入力してください。例: この画像について説明してください。"
 # RAG用インデックスの構築
 if use_rag and uploaded_files:
     file_ids = "".join([f.name + str(f.size) for f in uploaded_files])
@@ -553,6 +556,8 @@ for msg in st.session_state.messages:
                     st.markdown(item["text"])
                 elif item["type"] == "image_url":
                     st.image(item["image_url"]["url"])
+                elif item["type"] == "image":
+                    st.image(item["image"]["image_url"]["url"], caption=item["image"].get("alt", None))
         else:
             st.markdown(msg["content"])
 
@@ -611,17 +616,20 @@ if prompt := st.chat_input(input_label if not ocr_mode else "OCRの指示を入�
         # プロンプトに外部情報を注入
         content_list[0]["text"] = f"あなたは最新の外部データ（RAGや天気API）にアクセスしています。以下の情報を「現在の事実」として扱い、回答してください。\n{external_context}\n\n質問: {prompt}"
 
-    # RAGがオフの場合、または画像等の処理
-    if uploaded_files and not use_rag:
+    # アップロードされたファイルをチャットに含める
+    if uploaded_files:
         for f in uploaded_files:
-            if f.type.startswith("image/"):
+            if f.type.startswith("image/") and use_image_analysis:
                 # 画像データを読み込み、base64エンコード
                 img_bytes = f.read()
                 base64_image = base64.b64encode(img_bytes).decode('utf-8')
                 f.seek(0)  # 後続の st.image(f) で画像を表示するためにポインタを先頭に戻す
                 content_list.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{f.type};base64,{base64_image}"}
+                    "type": "image",
+                    "image": {
+                        "image_url": {"url": f"data:{f.type};base64,{base64_image}"},
+                        "alt": f"Uploaded image: {f.name}"
+                    }
                 })
             elif f.type == "application/pdf":
                 reader = PdfReader(f)
