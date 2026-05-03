@@ -12,8 +12,8 @@ from icalendar import Calendar
 import urllib.parse
 from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 
 # --- 代替Embeddingsクラス ---
